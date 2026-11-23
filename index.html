@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="manifest" href="manifest.webmanifest"><meta name="theme-color" content="#0f172a"><title>کنترل لامپ با MQTT</title>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;font-family:Tahoma,Vazirmatn,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;flex-direction:column;align-items:center;padding:20px;transition:background .4s}
+body.on{background:#1e293b}
+h1{font-size:20px;margin:8px 0 10px}
+.bulb{font-size:110px;filter:grayscale(1) brightness(.5);transition:.4s}
+body.on .bulb{filter:none;text-shadow:0 0 60px #facc15;transform:scale(1.05)}
+.card{background:#1e293b;border-radius:18px;padding:16px;width:100%;max-width:420px;margin-top:14px}
+body.on .card{background:#334155}
+label{font-size:13px;color:#94a3b8;display:block;margin-top:10px}
+input,select{width:100%;padding:12px;border-radius:10px;border:1px solid #475569;background:#0f172a;color:#fff;font-size:16px;margin-top:6px;font-family:inherit}
+button{border:0;border-radius:12px;padding:14px;font-size:16px;cursor:pointer;color:#fff;font-family:inherit}
+.row{display:flex;gap:8px;margin-top:10px}.row button{flex:1}
+.on-b{background:#16a34a}.off-b{background:#dc2626}.mic{background:#2563eb;width:100%;margin-bottom:10px;font-size:18px}.save{background:#475569;width:100%;margin-top:12px}
+.mic.rec{background:#f59e0b;animation:p 1s infinite}
+@keyframes p{50%{opacity:.6}}
+#log{font-size:14px;min-height:22px;margin-top:10px;color:#fde68a}
+.st{display:inline-block;padding:4px 12px;border-radius:99px;font-size:13px;background:#7f1d1d}
+.st.ok{background:#14532d}
+small{color:#94a3b8;display:block;margin-top:8px;line-height:1.8}
+code{direction:ltr;display:inline-block;background:#0f172a;padding:2px 6px;border-radius:6px}
+</style>
+</head>
+<body>
+<h1>💡 کنترل لامپ با MQTT</h1>
+<span class="st" id="st">قطع</span>
+<span class="st" id="dev" style="margin-right:6px">دستگاه: نامشخص</span>
+<div class="bulb" id="bulb">💡</div>
+
+<div class="card">
+  <button class="mic" id="mic">🎤 دستور صوتی بده</button>
+  <input id="cmd" placeholder="مثلاً: لامپ رو روشن کن" enterkeyhint="send">
+  <div class="row"><button class="on-b" id="bOn">روشن</button><button class="off-b" id="bOff">خاموش</button></div>
+  <div id="log"></div>
+</div>
+
+<div class="card">
+  <label>بروکر</label>
+  <select id="broker">
+    <option value="wss://broker.emqx.io:8084/mqtt">broker.emqx.io</option>
+    <option value="wss://broker.hivemq.com:8884/mqtt">broker.hivemq.com</option>
+    <option value="custom">بروکر دلخواه (wss)…</option>
+  </select>
+  <input id="custom" placeholder="wss://your-broker:8084/mqtt" dir="ltr" style="display:none">
+  <label>کاربر / رمز (اختیاری)</label>
+  <input id="user" placeholder="username" dir="ltr">
+  <input id="pass" placeholder="password" type="password" dir="ltr">
+  <label>تاپیک اختصاصی (باید با ESP یکی باشد)</label>
+  <input id="topic" dir="ltr">
+  <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="ret" style="width:auto;margin:0" checked> اگر دستگاه خاموش بود، با روشن شدنش آخرین دستور اجرا شود</label>
+  <button class="save" id="save">ذخیره و اتصال</button>
+  <small>دستور به <code id="t1"></code> ارسال می‌شود و وضعیت از <code id="t2"></code> خوانده می‌شود. بروکرهای عمومی رمز ندارند؛ تاپیک را طولانی و غیرقابل حدس نگه دار.</small>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const S=JSON.parse(localStorage.getItem('mqtt_cfg')||'{}');
+if(!S.topic)S.topic='lamp-'+Math.random().toString(36).slice(2,10)+Math.random().toString(36).slice(2,6);
+$('broker').value=S.broker||$('broker').options[0].value;
+$('custom').value=S.custom||'';$('user').value=S.user||'';$('pass').value=S.pass||'';$('topic').value=S.topic;
+const showCustom=()=>$('custom').style.display=$('broker').value==='custom'?'block':'none';
+$('broker').onchange=showCustom;showCustom();
+const log=t=>$('log').textContent=t;
+const setUI=on=>document.body.classList.toggle('on',on);
+let client=null;
+const tOn=()=>$('topic').value.trim()+'/online';
+const tCmd=()=>$('topic').value.trim()+'/cmd', tSt=()=>$('topic').value.trim()+'/state';
+
+function connect(){
+  if(client){client.end(true);client=null}
+  S.broker=$('broker').value;S.custom=$('custom').value.trim();S.user=$('user').value;S.pass=$('pass').value;S.topic=$('topic').value.trim();
+  localStorage.setItem('mqtt_cfg',JSON.stringify(S));
+  $('t1').textContent=tCmd();$('t2').textContent=tSt();
+  const url=S.broker==='custom'?S.custom:S.broker;
+  const opt={clientId:'web-'+Math.random().toString(16).slice(2,10),reconnectPeriod:3000,connectTimeout:8000};
+  if(S.user){opt.username=S.user;opt.password=S.pass}
+  $('st').textContent='در حال اتصال...';$('st').className='st';
+  client=mqtt.connect(url,opt);
+  client.on('connect',()=>{$('st').textContent='متصل به بروکر';$('st').className='st ok';client.subscribe(tSt());client.subscribe(tOn());log('')});
+  client.on('close',()=>{$('st').textContent='قطع';$('st').className='st'});
+  client.on('error',e=>log('خطا: '+e.message));
+  client.on('message',(t,m)=>{if(t===tOn()){const o=m.toString().trim()==='online';$('dev').textContent='دستگاه: '+(o?'آنلاین':'آفلاین');$('dev').className='st'+(o?' ok':'');return}
+  const v=m.toString().trim().toLowerCase();setUI(v==='on');log(v==='on'?'✅ لامپ روشن است':'✅ لامپ خاموش است')});
+}
+$('save').onclick=connect;
+
+function send(a){
+  if(!client||!client.connected){log('به اینترنت/بروکر وصل نیستی');return}
+  client.publish(tCmd(),a,{qos:1,retain:$('ret').checked&&a!=='status'});log('ارسال شد: '+(a==='on'?'روشن':a==='off'?'خاموش':a));
+}
+const norm=s=>s.replace(/[يى]/g,'ی').replace(/ك/g,'ک').toLowerCase();
+function parse(t){t=norm(t);
+  if(/خاموش|قطع|off|ببند/.test(t))return 'off';
+  if(/روشن|وصل|on|بزن|بسوز/.test(t))return 'on';
+  if(/وضعیت|status/.test(t))return 'status';return null}
+function run(t){const a=parse(t);if(!a){log('دستور را متوجه نشدم: «'+t+'»');return}send(a)}
+$('bOn').onclick=()=>send('on');$('bOff').onclick=()=>send('off');
+$('cmd').addEventListener('keydown',e=>{if(e.key==='Enter'){run($('cmd').value);$('cmd').value=''}});
+
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+if(!SR)$('mic').style.display='none';
+else{const r=new SR();r.lang='fa-IR';r.interimResults=false;
+  r.onstart=()=>{$('mic').classList.add('rec');$('mic').textContent='🎙️ در حال گوش دادن...'};
+  r.onend=()=>{$('mic').classList.remove('rec');$('mic').textContent='🎤 دستور صوتی بده'};
+  r.onresult=e=>{const t=e.results[0][0].transcript;$('cmd').value=t;run(t)};
+  r.onerror=e=>log('خطای میکروفون: '+e.error);
+  $('mic').onclick=()=>{try{r.start()}catch(e){}}}
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+connect();
+</script>
+</body>
+</html>
